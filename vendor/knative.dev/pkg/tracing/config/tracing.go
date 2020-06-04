@@ -37,6 +37,7 @@ const (
 	zipkinEndpointKey       = "zipkin-endpoint"
 	debugKey                = "debug"
 	sampleRateKey           = "sample-rate"
+	kubeTracing             = "kube-tracing"
 	stackdriverProjectIDKey = "stackdriver-project-id"
 )
 
@@ -57,9 +58,9 @@ type Config struct {
 	Backend              BackendType
 	ZipkinEndpoint       string
 	StackdriverProjectID string
-
-	Debug      bool
-	SampleRate float64
+	KubeTracing          bool
+	Debug                bool
+	SampleRate           float64
 }
 
 // Equals returns true if two Configs are identical
@@ -103,6 +104,7 @@ func NewTracingConfigFromMap(cfgMap map[string]string) (*Config, error) {
 		cm.AsString(zipkinEndpointKey, &tc.ZipkinEndpoint),
 		cm.AsString(stackdriverProjectIDKey, &tc.StackdriverProjectID),
 		cm.AsBool(debugKey, &tc.Debug),
+		cm.AsBool(kubeTracing, &tc.KubeTracing),
 		cm.AsFloat64(sampleRateKey, &tc.SampleRate),
 	); err != nil {
 		return nil, err

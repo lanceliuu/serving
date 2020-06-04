@@ -18,6 +18,7 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -25,9 +26,12 @@ import (
 	"go.opencensus.io/plugin/ochttp"
 	"go.opencensus.io/trace"
 	"go.uber.org/zap"
+	"k8s.io/client-go/kubernetes"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"knative.dev/pkg/logging"
 	pkgnet "knative.dev/pkg/network"
+	"knative.dev/pkg/tracing"
 	tracingconfig "knative.dev/pkg/tracing/config"
 	"knative.dev/serving/pkg/activator"
 	activatorconfig "knative.dev/serving/pkg/activator/config"
@@ -48,26 +52,45 @@ type activationHandler struct {
 	tracingTransport http.RoundTripper
 	throttler        Throttler
 	bufferPool       httputil.BufferPool
+	kubeClient       kubernetes.Interface
 }
 
 // New constructs a new http.Handler that deals with revision activation.
-func New(ctx context.Context, t Throttler) http.Handler {
+func New(ctx context.Context, t Throttler, kubeClient kubernetes.Interface) http.Handler {
 	defaultTransport := pkgnet.AutoTransport
 	return &activationHandler{
 		transport:        defaultTransport,
 		tracingTransport: &ochttp.Transport{Base: defaultTransport},
 		throttler:        t,
 		bufferPool:       network.NewBufferPool(),
+		kubeClient:       kubeClient,
 	}
 }
 
 func (a *activationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	logger := logging.FromContext(r.Context())
-	tracingEnabled := activatorconfig.FromContext(r.Context()).Tracing.Backend != tracingconfig.None
-
+	tracingConfig := activatorconfig.FromContext(r.Context()).Tracing
+	tracingEnabled := tracingConfig.Backend != tracingconfig.None
 	tryContext, trySpan := r.Context(), (*trace.Span)(nil)
 	if tracingEnabled {
 		tryContext, trySpan = trace.StartSpan(r.Context(), "throttler_try")
+	}
+
+	name := r.Header.Get(activator.RevisionHeaderName)
+	namespace := r.Header.Get(activator.RevisionHeaderNamespace)
+	if tracingConfig.KubeTracing && trySpan.SpanContext().IsSampled() {
+		lo := metav1.ListOptions{LabelSelector: fmt.Sprintf("app=%s", name)}
+		watch, err := a.kubeClient.CoreV1().Pods(namespace).Watch(lo)
+		if err != nil {
+			logger.Errorw("Failed to set up pod watch for tracing", zap.Error(err))
+		} else {
+			defer watch.Stop()
+
+			stopCh := make(chan struct{})
+			defer close(stopCh)
+
+			go tracing.TracePodStartup(tryContext, stopCh, watch.ResultChan())
+		}
 	}
 
 	if err := a.throttler.Try(tryContext, func(dest string) error {
