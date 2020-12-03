@@ -95,6 +95,15 @@ func makePodSpec(rev *v1.Revision, cfg *config.Config) (*corev1.PodSpec, error) 
 
 	podSpec := BuildPodSpec(rev, append(BuildUserContainers(rev), *queueContainer), cfg)
 
+	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+		Name: "istio-certs",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium: corev1.StorageMediumMemory,
+			},
+		},
+	})
+
 	if cfg.Observability.EnableVarLogCollection {
 		podSpec.Volumes = append(podSpec.Volumes, varLogVolume)
 

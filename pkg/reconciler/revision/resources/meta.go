@@ -56,7 +56,19 @@ func makeLabels(revision *v1.Revision) map[string]string {
 }
 
 func makeAnnotations(revision *v1.Revision) map[string]string {
-	return kmeta.FilterMap(revision.GetAnnotations(), excludeAnnotations.Has)
+	return kmeta.UnionMaps(kmeta.FilterMap(revision.GetAnnotations(), excludeAnnotations.Has), map[string]string{
+		"sidecar.istio.io/inject":                          "true",
+		"sidecar.istio.io/interceptionMode":                "NONE",
+		"status.sidecar.istio.io/port":                     "0",
+		"sidecar.istio.io/rewriteAppHTTPProbers":           "false",
+		"traffic.sidecar.istio.io/includeInboundPorts":     "",
+		"traffic.sidecar.istio.io/includeOutputPorts":      "",
+		"traffic.sidecar.istio.io/includeOutboundIPRanges": "",
+		"proxy.istio.io/config": `proxyMetadata:
+  OUTPUT_CERTS: /etc/istio-certs`,
+		"sidecar.istio.io/userVolume":      `[{"name": "istio-certs", "emptyDir": {"medium": "Memory"}}]`,
+		"sidecar.istio.io/userVolumeMount": `[{"name": "istio-certs", "mountPath": "/etc/istio-certs"}]`,
+	})
 }
 
 // makeSelector constructs the Selector we will apply to K8s resources.

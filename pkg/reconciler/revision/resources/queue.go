@@ -265,6 +265,11 @@ func makeQueueContainer(rev *v1.Revision, cfg *config.Config) (*corev1.Container
 		return nil, fmt.Errorf("failed to serialize readiness probe: %w", err)
 	}
 
+	var mounts = []corev1.VolumeMount{{
+		Name:      "istio-certs",
+		MountPath: "/etc/certs",
+	}}
+
 	return &corev1.Container{
 		Name:            QueueContainerName,
 		Image:           cfg.Deployment.QueueSidecarImage,
@@ -272,6 +277,7 @@ func makeQueueContainer(rev *v1.Revision, cfg *config.Config) (*corev1.Container
 		Ports:           ports,
 		ReadinessProbe:  makeQueueProbe(rp),
 		SecurityContext: queueSecurityContext,
+		VolumeMounts:    mounts,
 		Env: []corev1.EnvVar{{
 			Name:  "SERVING_NAMESPACE",
 			Value: rev.Namespace,

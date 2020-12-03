@@ -18,9 +18,13 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
+	"io/ioutil"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -172,13 +176,22 @@ func main() {
 
 	mainServer := buildServer(ctx, env, healthState, probe, stats, logger)
 	servers := map[string]*http.Server{
-		"main":    mainServer,
-		"admin":   buildAdminServer(logger, healthState),
-		"metrics": buildMetricsServer(promStatReporter, protoStatReporter),
+		"main": mainServer,
+		// "admin": buildAdminServer(logger, healthState),
+		// "metrics": buildMetricsServer(promStatReporter, protoStatReporter),
 	}
 	if env.EnableProfiling {
 		servers["profile"] = profiling.NewServer(profiling.NewHandler(logger, true))
 	}
+
+	time.Sleep(5 * time.Second) // Hackedy-hack hack: wait for the certs to get placed in /etc/certs.
+
+	caCert, err := ioutil.ReadFile("/etc/certs/cert-chain.pem")
+	if err != nil {
+		log.Fatal(err)
+	}
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
 
 	errCh := make(chan error)
 	listenCh := make(chan struct{})
@@ -195,8 +208,13 @@ func main() {
 				close(listenCh)
 			}
 
+			s.TLSConfig = &tls.Config{
+				ClientCAs:  caCertPool,
+				ClientAuth: tls.RequireAndVerifyClientCert,
+			}
+
 			// Don't forward ErrServerClosed as that indicates we're already shutting down.
-			if err := s.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := s.ServeTLS(l, "/etc/certs/cert-chain.pem", "/etc/certs/key.pem"); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errCh <- fmt.Errorf("%s server failed to serve: %w", name, err)
 			}
 		}(name, server)
