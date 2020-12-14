@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -24,13 +25,14 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
@@ -58,6 +60,11 @@ import (
 	"knative.dev/serving/pkg/queue"
 	"knative.dev/serving/pkg/queue/health"
 	"knative.dev/serving/pkg/queue/readiness"
+
+	istiosecurity "istio.io/istio/pkg/security"
+	"istio.io/istio/pkg/spiffe"
+	citadel "istio.io/istio/security/pkg/nodeagent/caclient/providers/citadel"
+	pkiutil "istio.io/istio/security/pkg/pki/util"
 )
 
 const (
@@ -184,17 +191,11 @@ func main() {
 		servers["profile"] = profiling.NewServer(profiling.NewHandler(logger, true))
 	}
 
-	time.Sleep(5 * time.Second) // Hackedy-hack hack: wait for the certs to get placed in /etc/certs.
-
-	caCert, err := ioutil.ReadFile("/etc/certs/cert-chain.pem")
-	if err != nil {
-		log.Fatal(err)
-	}
-	caCertPool := x509.NewCertPool()
-	caCertPool.AppendCertsFromPEM(caCert)
-
 	errCh := make(chan error)
 	listenCh := make(chan struct{})
+
+	mtlsLoader := newmTLSLoader(ctx, logger, env, errCh)
+
 	for name, server := range servers {
 		go func(name string, s *http.Server) {
 			l, err := net.Listen("tcp", s.Addr)
@@ -209,12 +210,13 @@ func main() {
 			}
 
 			s.TLSConfig = &tls.Config{
-				ClientCAs:  caCertPool,
-				ClientAuth: tls.RequireAndVerifyClientCert,
+				ClientCAs:      mtlsLoader.caCertPool(),
+				ClientAuth:     tls.RequireAndVerifyClientCert,
+				GetCertificate: mtlsLoader.getClientCertificate,
 			}
 
 			// Don't forward ErrServerClosed as that indicates we're already shutting down.
-			if err := s.ServeTLS(l, "/etc/certs/cert-chain.pem", "/etc/certs/key.pem"); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			if err := s.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errCh <- fmt.Errorf("%s server failed to serve: %w", name, err)
 			}
 		}(name, server)
@@ -328,6 +330,167 @@ func buildServer(ctx context.Context, env config, healthState *health.State, rp 
 	composedHandler = pushRequestLogHandler(logger, composedHandler, env)
 
 	return pkgnet.NewServer(":"+env.QueueServingPort, composedHandler)
+}
+
+type mtlsLoader struct {
+	ctx          context.Context
+	logger       *zap.SugaredLogger
+	lock         sync.Mutex
+	env          config
+	ready        chan struct{}
+	errorChan    chan error
+	csrKey       []byte
+	csrPEM       []byte
+	saToken      []byte
+	certChainPEM []byte
+	certPool     *x509.CertPool
+	certificate  *tls.Certificate
+	caClient     istiosecurity.Client
+	once         sync.Once
+}
+
+func newmTLSLoader(ctx context.Context, logger *zap.SugaredLogger, cfg config, errorChan chan error) *mtlsLoader {
+	m := &mtlsLoader{
+		ctx:       ctx,
+		ready:     make(chan struct{}),
+		env:       cfg,
+		errorChan: errorChan,
+	}
+	go m.init()
+	return m
+}
+
+func (m *mtlsLoader) init() {
+	const (
+		caEndpoint            = "istiod.istio-system.svc:15012"
+		citadelCACertFileName = "/var/run/secrets/istio/root-cert.pem"
+		k8sSAJwtFileName      = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	)
+	logger := m.logger
+	m.once.Do(func() {
+		m.lock.Lock()
+		defer m.lock.Unlock()
+		var rootCert []byte
+		var err error
+		if rootCert, err = ioutil.ReadFile(citadelCACertFileName); err != nil {
+			m.errorChan <- fmt.Errorf("invalid config - %s missing a root certificate %s", caEndpoint, citadelCACertFileName)
+			return
+		}
+		logger.Infof("Using CA %s cert with certs: %s", caEndpoint, citadelCACertFileName)
+
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(rootCert)
+		m.certPool = caCertPool
+
+		caClient, err := citadel.NewCitadelClient(caEndpoint, true, rootCert, "Kubernetes")
+		if err != nil {
+			m.errorChan <- err
+			return
+		}
+		m.caClient = caClient
+		saname, ok := os.LookupEnv("SERVICE_ACCOUNT")
+		if !ok {
+			m.errorChan <- fmt.Errorf("failed to parse service account name from env SERVICE_ACCOUNT")
+			return
+		}
+		csrHostName := &spiffe.Identity{
+			TrustDomain:    "cluster.local",
+			Namespace:      m.env.ServingNamespace,
+			ServiceAccount: saname,
+		}
+
+		options := pkiutil.CertOptions{
+			Host:       csrHostName.String(),
+			RSAKeySize: 2048,
+		}
+
+		token, err := ioutil.ReadFile(k8sSAJwtFileName)
+		if err != nil {
+			m.errorChan <- fmt.Errorf("failed to read token: %s", err)
+			return
+		}
+		m.saToken = token
+		csrPEM, keyPEM, err := pkiutil.GenCSR(options)
+		if err != nil {
+			m.errorChan <- fmt.Errorf("failed to generate key and certificate for CSR: %v", err)
+			return
+		}
+		m.csrKey, m.csrPEM = keyPEM, csrPEM
+		err = m.signCSR()
+		if err != nil {
+			m.errorChan <- err
+			return
+		}
+		go m.refreshTLSCertificates()
+		close(m.ready)
+	})
+}
+
+func concatCerts(certsPEM []string) []byte {
+	if len(certsPEM) == 0 {
+		return []byte{}
+	}
+	var certChain bytes.Buffer
+	for i, c := range certsPEM {
+		certChain.WriteString(c)
+		if i < len(certsPEM)-1 && !strings.HasSuffix(c, "\n") {
+			certChain.WriteString("\n")
+		}
+	}
+	return certChain.Bytes()
+}
+
+func (m *mtlsLoader) signCSR() error {
+	certChainPEM, err := m.caClient.CSRSign(m.ctx, m.csrPEM, string(m.saToken), int64(time.Hour.Seconds()*24))
+	if err != nil {
+		return err
+	}
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	tlscert, err := tls.X509KeyPair(concatCerts(certChainPEM), m.csrKey)
+	if err != nil {
+		return err
+	}
+	m.certificate = &tlscert
+	return nil
+}
+
+func (m *mtlsLoader) refreshTLSCertificates() {
+	<-m.ready
+	for {
+		x509Cert, err := x509.ParseCertificate(m.certificate.Certificate[0])
+		if err != nil { // should not happen
+			m.logger.Errorw("failed to parse certificate", zap.Error(err))
+			time.Sleep(10 * time.Second)
+			continue
+		}
+		expireDate := x509Cert.NotAfter
+		m.logger.Infof("cert will expire at: %s", expireDate.String())
+		timeToRefresh := expireDate.Sub(time.Now().Add(time.Duration(time.Minute * 5)))
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-time.After(timeToRefresh):
+			err = m.signCSR()
+			if err != nil && err != context.Canceled {
+				m.logger.Errorw("failed to sign CSR", zap.Error(err))
+				time.Sleep(10 * time.Second)
+				continue
+			}
+		}
+	}
+}
+
+func (m *mtlsLoader) caCertPool() *x509.CertPool {
+	<-m.ready
+	return m.certPool
+}
+func (m *mtlsLoader) getClientCertificate(unused *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	<-m.ready
+	// ignored cri
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	return m.certificate, nil
 }
 
 func buildTransport(env config, logger *zap.SugaredLogger, maxConns int) http.RoundTripper {
