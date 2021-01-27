@@ -39,3 +39,5 @@ require (
 	knative.dev/pkg v0.0.0-20201224024804-27db5ac24cfb
 	sigs.k8s.io/yaml v1.2.0
 )
+
+replace knative.dev/pkg => github.com/lanceliuu/pkg v0.0.0-20210106144600-c0cfab55a924

@@ -220,7 +220,35 @@ func main() {
 		"h2c":     pkgnet.NewServer(":"+strconv.Itoa(networking.BackendHTTP2Port), ah),
 		"profile": profiling.NewServer(profilingHandler),
 	}
+	// caFile := "/etc/istio-certs/root-cert.pem"
+	// certFile := "/etc/istio-certs/cert-chain.pem"
+	// keyFile := "/etc/istio-certs/key.pem"
 
+	// m := pkgnet.NewmTLSCertificate(caFile, certFile, keyFile)
+
+	// tlsCfg := &tls.Config{
+	// 	GetClientCertificate: m.GetClientCertificate,
+	// 	RootCAs:              x509.NewCertPool(),
+	// }
+	// var caPEM []byte
+	// for {
+	// 	var err error
+	// 	if _, err = os.Stat(caFile); err != nil {
+	// 		logger.Errorw("rootCA file not populated", zap.Error(err))
+	// 		time.Sleep(time.Duration(1) * time.Second)
+	// 		continue
+	// 	}
+	// 	caPEM, err = ioutil.ReadFile(caFile)
+	// 	if err != nil {
+	// 		logger.Errorw("read CA failed", zap.Error(err))
+	// 		continue
+	// 	}
+	// 	break
+	// }
+	// if ok := tlsCfg.RootCAs.AppendCertsFromPEM(caPEM); !ok {
+	// 	logger.Errorw("append CA failed")
+	// }
+	// servers["http1"].TLSConfig = tlsCfg
 	errCh := make(chan error, len(servers))
 	for name, server := range servers {
 		go func(name string, s *http.Server) {
@@ -228,6 +256,7 @@ func main() {
 			if err := s.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errCh <- fmt.Errorf("%s server failed: %w", name, err)
 			}
+
 		}(name, server)
 	}
 

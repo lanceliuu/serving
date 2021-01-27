@@ -155,7 +155,7 @@ func (rw *revisionWatcher) getK8sPrivateService() (*corev1.Service, error) {
 
 func (rw *revisionWatcher) probe(ctx context.Context, dest string) (bool, error) {
 	httpDest := url.URL{
-		Scheme: "http",
+		Scheme: "https",
 		Host:   dest,
 		Path:   network.ProbePath,
 	}
@@ -301,34 +301,34 @@ func (rw *revisionWatcher) checkDests(curDests, prevDests dests) {
 		}
 	}
 
-	// If we failed to probe even a single pod, check the clusterIP.
-	// NB: We can't cache the IP address, since user might go rogue
-	// and delete the K8s service. We'll fix it, but the cluster IP will be different.
-	dest, err := rw.getDest()
-	if err != nil {
-		rw.logger.Errorw("Failed to determine service destination", zap.Error(err))
-		return
-	}
+	// // If we failed to probe even a single pod, check the clusterIP.
+	// // NB: We can't cache the IP address, since user might go rogue
+	// // and delete the K8s service. We'll fix it, but the cluster IP will be different.
+	// dest, err := rw.getDest()
+	// if err != nil {
+	// 	rw.logger.Errorw("Failed to determine service destination", zap.Error(err))
+	// 	return
+	// }
 
-	// If cluster IP is healthy and we haven't scaled down, short circuit.
-	if rw.clusterIPHealthy {
-		rw.logger.Debugf("ClusterIP %s already probed (ready backends: %d)", dest, len(curDests.ready))
-		rw.sendUpdate(dest, curDests.ready)
-		return
-	}
+	// // If cluster IP is healthy and we haven't scaled down, short circuit.
+	// if rw.clusterIPHealthy {
+	// 	rw.logger.Debugf("ClusterIP %s already probed (ready backends: %d)", dest, len(curDests.ready))
+	// 	rw.sendUpdate(dest, curDests.ready)
+	// 	return
+	// }
 
-	// If clusterIP is healthy send this update and we are done.
-	if ok, err := rw.probeClusterIP(dest); err != nil {
-		rw.logger.Errorw("Failed to probe clusterIP "+dest, zap.Error(err))
-	} else if ok {
-		// We can reach here only iff pods are not successfully individually probed
-		// but ClusterIP conversely has been successfully probed.
-		rw.podsAddressable = false
-		rw.logger.Debugf("ClusterIP is successfully probed: %s (ready backends: %d)", dest, len(curDests.ready))
-		rw.clusterIPHealthy = true
-		rw.healthyPods = nil
-		rw.sendUpdate(dest, curDests.ready)
-	}
+	// // If clusterIP is healthy send this update and we are done.
+	// if ok, err := rw.probeClusterIP(dest); err != nil {
+	// 	rw.logger.Errorw("Failed to probe clusterIP "+dest, zap.Error(err))
+	// } else if ok {
+	// 	// We can reach here only iff pods are not successfully individually probed
+	// 	// but ClusterIP conversely has been successfully probed.
+	// 	rw.podsAddressable = false
+	// 	rw.logger.Debugf("ClusterIP is successfully probed: %s (ready backends: %d)", dest, len(curDests.ready))
+	// 	rw.clusterIPHealthy = true
+	// 	rw.healthyPods = nil
+	// 	rw.sendUpdate(dest, curDests.ready)
+	// }
 }
 
 func (rw *revisionWatcher) run(probeFrequency time.Duration) {

@@ -28,6 +28,16 @@ spec:
     metadata:
       annotations:
         cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+        sidecar.istio.io/inject: "true"
+        sidecar.istio.io/proxyCPU: "4"
+        sidecar.istio.io/proxyMemory: 4Gi
+        # traffic.sidecar.istio.io/includeInboundPorts: ""   # do not intercept any inbound ports
+        traffic.sidecar.istio.io/includeOutboundIPRanges: ""  # do not intercept any outbound traffic
+        proxy.istio.io/config: |  # configure an env variable `OUTPUT_CERTS` to write certificates to the given folder
+          proxyMetadata:
+            OUTPUT_CERTS: /etc/istio-certs
+        sidecar.istio.io/userVolume: '[{"name": "istio-certs", "emptyDir": {"medium":"Memory"}}]'  # mount the shared volume
+        sidecar.istio.io/userVolumeMount: '[{"name": "istio-certs", "mountPath": "/etc/istio-certs"}]'
       labels:
         app: activator
         role: activator
@@ -47,9 +57,8 @@ spec:
             cpu: 300m
             memory: 60Mi
           limits:
-            cpu: 1000m
-            memory: 600Mi
-
+            cpu: 4
+            memory: 4Gi
         env:
         # Run Activator with GC collection when newly generated memory is 500%.
         - name: GOGC
@@ -107,7 +116,9 @@ spec:
               value: "activator"
           failureThreshold: 12
           initialDelaySeconds: 15
-
+        volumeMounts:
+        - mountPath: /etc/istio-certs/
+          name: istio-certs
       # The activator (often) sits on the dataplane, and may proxy long (e.g.
       # streaming, websockets) requests.  We give a long grace period for the
       # activator to "lame duck" and drain outstanding requests before we
@@ -115,6 +126,10 @@ spec:
       # should be at least as large as the upper bound on the Revision's
       # timeoutSeconds property to avoid servicing events disrupting
       # connections.
+      volumes:
+      - name: istio-certs
+        emptyDir:
+          medium: Memory
       terminationGracePeriodSeconds: 600
 
 ---
@@ -144,3 +159,14 @@ spec:
     port: 81
     targetPort: 8013
   type: ClusterIP
+
+# apiVersion: networking.istio.io/v1beta1
+# kind: DestinationRule
+# metadata:
+#   name: activator
+#   namespace: knative-serving
+# spec:
+#   host: activator-service.knative-serving.svc.cluster.local
+#   trafficPolicy:
+#     tls:
+#       mode: DISABLE

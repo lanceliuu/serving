@@ -18,12 +18,16 @@ package network
 
 import (
 	"context"
-	"errors"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"net/http"
+	"os"
+	"sync"
 	"time"
-
+	"errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -95,13 +99,104 @@ func dialBackOffHelper(ctx context.Context, network, address string, bo wait.Bac
 }
 
 func newHTTPTransport(disableKeepAlives bool, maxIdle, maxIdlePerHost int) http.RoundTripper {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = DialWithBackOff
-	transport.DisableKeepAlives = disableKeepAlives
-	transport.MaxIdleConns = maxIdle
-	transport.MaxIdleConnsPerHost = maxIdlePerHost
-	transport.ForceAttemptHTTP2 = false
-	return transport
+	return &http.Transport{
+		// Those match net/http/transport.go
+		Proxy:                 http.ProxyFromEnvironment,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DisableKeepAlives:     disableKeepAlives,
+		TLSClientConfig:       newmTLSClientConfig(),
+		// Those are bespoke.
+		DialContext:         DialWithBackOff,
+		MaxIdleConns:        maxIdle,
+		MaxIdleConnsPerHost: maxIdlePerHost,
+	}
+}
+
+func newmTLSClientConfig() *tls.Config {
+	caFile := "/etc/istio-certs/root-cert.pem"
+	certFile := "/etc/istio-certs/cert-chain.pem"
+	keyFile := "/etc/istio-certs/key.pem"
+	n := newmtlsCertificate(caFile, certFile, keyFile)
+	return &tls.Config{
+		RootCAs: n.certPool,
+		// this is must have for tls verification using istio certs.
+		// need to figure out what has been done from istio side
+		InsecureSkipVerify:   true,
+		GetClientCertificate: n.getClientCertificate,
+	}
+}
+
+type mtlsCertificate struct {
+	caPath        string
+	certPath      string
+	keyPath       string
+	certPool      *x509.CertPool
+	clientKeyPair *tls.Certificate
+	lock          sync.Mutex
+}
+
+func newmtlsCertificate(caPath, certPath, keyPath string) *mtlsCertificate {
+	m := &mtlsCertificate{
+		caPath:   caPath,
+		certPath: certPath,
+		keyPath:  keyPath,
+		certPool: x509.NewCertPool(),
+	}
+	go m.reloadClientKeyPair()
+	return m
+}
+
+func (m *mtlsCertificate) reloadClientKeyPair() {
+	for {
+		var ca, cert, key bool
+		if _, err := os.Stat(m.caPath); err == nil {
+			ca = true
+		}
+		if _, err := os.Stat(m.certPath); err == nil {
+			cert = true
+		}
+		if _, err := os.Stat(m.keyPath); err == nil {
+			key = true
+		}
+		if !(ca && cert && key) {
+			fmt.Printf("cert file not loaded\n")
+			time.Sleep(time.Duration(1 * time.Second))
+			continue
+		}
+		caData, _ := ioutil.ReadFile(m.caPath)
+		clientKeyPair, err := tls.LoadX509KeyPair(m.certPath, m.keyPath)
+		if err != nil {
+			fmt.Printf("load x509 key and cert error %#v \n", err)
+			continue
+		}
+		x509Cert, err := x509.ParseCertificate(clientKeyPair.Certificate[0])
+		if err != nil {
+			fmt.Printf("parse cert errored %+v\n", err)
+			continue
+		}
+		fmt.Printf("parsed cert successfully %#v \n", x509Cert)
+		m.lock.Lock()
+		m.certPool.AppendCertsFromPEM(caData)
+		m.clientKeyPair = &clientKeyPair
+		m.lock.Unlock()
+		expireDate := x509Cert.NotAfter
+		fmt.Printf("cert expire date: %s\n", expireDate.String())
+		timeToRefresh := expireDate.Sub(time.Now().Add(time.Duration(time.Minute * 5)))
+		<-time.After(timeToRefresh)
+		fmt.Printf("refresh cert at : %s\n", time.Now().String())
+	}
+}
+
+func (m *mtlsCertificate) getClientCertificate(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	// ignored cri
+	m.lock.Lock()
+	defer m.lock.Unlock()
+	if m.clientKeyPair == nil {
+		return nil, fmt.Errorf("cert not loaded yet")
+	}
+	return m.clientKeyPair, nil
 }
 
 // NewProberTransport creates a RoundTripper that is useful for probing,

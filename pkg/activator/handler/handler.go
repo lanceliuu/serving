@@ -82,7 +82,7 @@ func (a *activationHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			proxyCtx, proxySpan = trace.StartSpan(r.Context(), "activator_proxy")
 		}
 		a.proxyRequest(logger, w, r.WithContext(proxyCtx), &url.URL{
-			Scheme: "http",
+			Scheme: "https",
 			Host:   dest,
 		}, tracingEnabled)
 		proxySpan.End()
